@@ -1,4 +1,4 @@
-name: Build Hikari for Android (Safe Mode)
+name: Build Hikari-LLVM ARM64 (Fixed Path + Cross-Compile)
 
 on:
   workflow_dispatch:
@@ -7,69 +7,67 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
-        uses: actions/checkout@v3
-
-      - name: Setup Android NDK
-        uses: android-actions/setup-android@v2
-
-      - name: Install Ninja & CMake
-        run: sudo apt-get install -y ninja-build cmake lld
-
-      - name: Configure CMake
-        run: |
-          mkdir build
-          cd build
-          cmake -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DANDROID_STL=c++_static \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang" \
-            -DLLVM_TARGETS_TO_BUILD="AArch64" \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_TERMINFO=OFF \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_PARALLEL_LINK_JOBS=1 \
-            ../llvm
-
-      - name: Build Clang (Single Thread)
-        run: |
-          cd build
-          # -j1 это медленно, но гарантирует, что сервер не зависнет от нехватки RAM
-          ninja clang -j1
-
-      - name: Strip Binaries
-        run: |
-          cd build/bin
-          # Удаляем лишнее, чтобы уменьшить вес
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip clang
-          cp clang clang++
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          name: hikari-android-arm64-safe
-          path: build/bin/
-      - name: Build Clang + LLD
-        run: |
-          cd build
-          ninja clang lld clang-format  # Только нужное, ~20-40 мин
+          submodules: recursive  # Важно для Hikari passes
 
-      - name: Package binaries
+      - name: Debug repo structure (проверка)
+        run: |
+          ls -la
+          ls -la llvm/ || echo "No llvm/ dir!"
+          find . -name "CMakeLists.txt" | head -5
+
+      - name: Install deps + Cross-Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3 git lld \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-dev-arm64-cross
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+      - name: Configure CMake (FIXED: cd llvm/build + ../)
+        run: |
+          mkdir -p llvm/build
+          cd llvm/build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_TARGETS_TO_BUILD="AArch64" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DCMAKE_SKIP_RPATH=ON \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_ASM_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_SYSROOT=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            ../  # FIXED: ../ to llvm/
+
+      - name: Build (~30-60 min)
+        run: |
+          cd llvm/build
+          ninja clang lld clang-format -j8
+
+      - name: Strip & Package
         run: |
           mkdir -p dist/bin
-          cp build/bin/clang* dist/bin/
-          cp build/bin/lld dist/bin/
-          cp build/bin/llvm-* dist/bin/  # Полезные утилиты
-          tar -czf hikari-arm64-bin.tar.gz -C dist .
+          cd llvm/build/bin
+          aarch64-linux-gnu-strip clang* lld clang-format llvm-* 2>/dev/null || true
+          cp clang* ../../dist/bin/
+          cp lld ../../dist/bin/
+          cp llvm-* ../../dist/bin/ || true
+          cd ../../
+          tar -czf hikari-arm64-fixed.tar.gz -C dist .
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: hikari-arm64-bin
-          path: build/hikari-arm64-bin.tar.gz
+          name: hikari-arm64-fixed-bin
+          path: hikari-arm64-fixed.tar.gz
           retention-days: 30
