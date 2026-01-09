@@ -1,28 +1,35 @@
-name: Build Hikari-LLVM for ARM64 (Termux-ready)
+name: Build Hikari-LLVM ARM64 (Fixed Path + Cross-Compile)
 
 on:
-  workflow_dispatch:  # Запуск вручную из UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: linux-arm64  # GitHub ARM64 runner (native AArch64 сборка!)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive  # Важно для Hikari passes
 
-      - name: Install dependencies
+      - name: Debug repo structure (проверка)
+        run: |
+          ls -la
+          ls -la llvm/ || echo "No llvm/ dir!"
+          find . -name "CMakeLists.txt" | head -5
+
+      - name: Install deps + Cross-Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ninja-build cmake python3 python3-pip git lld \
-            libstdc++-12-dev libc++-dev libc++abi-dev
+          sudo apt-get install -y ninja-build cmake python3 git lld \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-dev-arm64-cross
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      - name: Configure with CMake (optimized for size/ARM)
+      - name: Configure CMake (FIXED: cd llvm/build + ../)
         run: |
-          mkdir build
-          cd build
+          mkdir -p llvm/build
+          cd llvm/build
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=MinSizeRel \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
@@ -32,25 +39,35 @@ jobs:
             -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_BUILD_LLVM_DYLIB=OFF \
             -DCMAKE_SKIP_RPATH=ON \
-            -DLLVM_LINK_LLVM_DYLIB=OFF \
-            ../llvm  # Путь к llvm в Hikari-репо
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_ASM_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_SYSROOT=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            ../  # FIXED: ../ to llvm/
 
-      - name: Build Clang + LLD
+      - name: Build (~30-60 min)
         run: |
-          cd build
-          ninja clang lld clang-format  # Только нужное, ~20-40 мин
+          cd llvm/build
+          ninja clang lld clang-format -j8
 
-      - name: Package binaries
+      - name: Strip & Package
         run: |
           mkdir -p dist/bin
-          cp build/bin/clang* dist/bin/
-          cp build/bin/lld dist/bin/
-          cp build/bin/llvm-* dist/bin/  # Полезные утилиты
-          tar -czf hikari-arm64-bin.tar.gz -C dist .
+          cd llvm/build/bin
+          aarch64-linux-gnu-strip clang* lld clang-format llvm-* 2>/dev/null || true
+          cp clang* ../../dist/bin/
+          cp lld ../../dist/bin/
+          cp llvm-* ../../dist/bin/ || true
+          cd ../../
+          tar -czf hikari-arm64-fixed.tar.gz -C dist .
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: hikari-arm64-bin
-          path: build/hikari-arm64-bin.tar.gz
+          name: hikari-arm64-fixed-bin
+          path: hikari-arm64-fixed.tar.gz
           retention-days: 30
