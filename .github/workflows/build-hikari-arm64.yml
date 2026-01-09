@@ -1,40 +1,59 @@
-name: Build Hikari-LLVM for ARM64 (Termux-ready)
+name: Build Hikari for Android (Safe Mode)
 
 on:
-  workflow_dispatch:  # Запуск вручную из UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: linux-arm64  # GitHub ARM64 runner (native AArch64 сборка!)
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout Source
+        uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            ninja-build cmake python3 python3-pip git lld \
-            libstdc++-12-dev libc++-dev libc++abi-dev
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v2
 
-      - name: Configure with CMake (optimized for size/ARM)
+      - name: Install Ninja & CMake
+        run: sudo apt-get install -y ninja-build cmake lld
+
+      - name: Configure CMake
         run: |
           mkdir build
           cd build
           cmake -G Ninja \
-            -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang" \
             -DLLVM_TARGETS_TO_BUILD="AArch64" \
-            -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_BUILD_LLVM_DYLIB=OFF \
-            -DCMAKE_SKIP_RPATH=ON \
-            -DLLVM_LINK_LLVM_DYLIB=OFF \
-            ../llvm  # Путь к llvm в Hikari-репо
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            ../llvm
 
+      - name: Build Clang (Single Thread)
+        run: |
+          cd build
+          # -j1 это медленно, но гарантирует, что сервер не зависнет от нехватки RAM
+          ninja clang -j1
+
+      - name: Strip Binaries
+        run: |
+          cd build/bin
+          # Удаляем лишнее, чтобы уменьшить вес
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip clang
+          cp clang clang++
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hikari-android-arm64-safe
+          path: build/bin/
       - name: Build Clang + LLD
         run: |
           cd build
