@@ -1,25 +1,28 @@
-name: Build Hikari-LLVM for ARM64 (Termux-ready)
+name: Build Hikari-LLVM ARM64 (Cross-Compile from x86)
 
 on:
-  workflow_dispatch:  # Запуск вручную из UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: linux-arm64  # GitHub ARM64 runner (native AArch64 сборка!)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install dependencies + Cross-Toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             ninja-build cmake python3 python3-pip git lld \
-            libstdc++-12-dev libc++-dev libc++abi-dev
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-dev-arm64-cross
+          # QEMU for cross-sysroot simulation
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      - name: Configure with CMake (optimized for size/ARM)
+      - name: Configure CMake (Cross for ARM64)
         run: |
           mkdir build
           cd build
@@ -32,25 +35,35 @@ jobs:
             -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_BUILD_LLVM_DYLIB=OFF \
             -DCMAKE_SKIP_RPATH=ON \
-            -DLLVM_LINK_LLVM_DYLIB=OFF \
-            ../llvm  # Путь к llvm в Hikari-репо
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_ASM_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_SYSROOT=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            ../llvm
 
-      - name: Build Clang + LLD
+      - name: Build Clang + LLD (fast on x86)
         run: |
           cd build
-          ninja clang lld clang-format  # Только нужное, ~20-40 мин
+          ninja clang lld clang-format -j8  # Быстро на 64 ядрах GH!
 
-      - name: Package binaries
+      - name: Strip & Package (small size)
         run: |
           mkdir -p dist/bin
-          cp build/bin/clang* dist/bin/
-          cp build/bin/lld dist/bin/
-          cp build/bin/llvm-* dist/bin/  # Полезные утилиты
-          tar -czf hikari-arm64-bin.tar.gz -C dist .
+          cd build/bin
+          aarch64-linux-gnu-strip clang lld clang-format llvm-*
+          cp clang* ../../dist/bin/
+          cp lld ../../dist/bin/
+          cp llvm-* ../../dist/bin/  # utils
+          cd ../../
+          tar -czf hikari-arm64-cross.tar.gz -C dist .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hikari-arm64-bin
-          path: build/hikari-arm64-bin.tar.gz
+          name: hikari-arm64-cross-bin
+          path: hikari-arm64-cross.tar.gz
           retention-days: 30
